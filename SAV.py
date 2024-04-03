@@ -4,10 +4,7 @@ from mindquantum.core.gates import X
 from mindquantum.core.circuit import Circuit,change_param_name
 from mindquantum.core.operators import Hamiltonian
 from mindquantum.simulator import Simulator
-from mindquantum.algorithm.nisq import Transform
-from mindquantum.algorithm.nisq import get_qubit_hamiltonian
 from mindquantum.core.operators import QubitOperator,Hamiltonian
-from mindquantum.core.parameterresolver import ParameterResolver
 import numpy as np                                          
 from mindquantum.core.gates import X, Y, Z, H, RX, RY, RZ   # 导入量子门H, X, Y, Z, RX, RY, RZ
 from mindquantum.core.circuit import Circuit,change_param_name
@@ -16,10 +13,11 @@ import logging,datetime,copy,pickle
 from typing import List
 from tool import compute_eigenvalue
 from mindquantum.core.parameterresolver import PRGenerator
+from mindquantum.core.circuit import change_param_name
 
 
 class Sequential_AdaptVQE():
-    def __init__(self,hamiltonian: QubitOperator,Layer:int=2)->None:
+    def __init__(self,hamiltonian: QubitOperator,Layer:int=2,iteration:int=10)->None:
         self.hamiltonian = hamiltonian
         self.n_qubits = Hamiltonian(hamiltonian=self.hamiltonian).n_qubits
         self.n_layers = Layer
@@ -28,9 +26,15 @@ class Sequential_AdaptVQE():
         self.simulator = Simulator('mqvector',self.n_qubits)
         self.current_time = str(datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
         self.parameter_geneartor = PRGenerator()
+        self.iteration = iteration
+        # self.adapt_result = AdaptResult()
+        self.vqe_history = []
         self.logger_init()
+        self.logger.info('初始化无报错，开始进行......')
+        self.current_ansatz = Circuit()
+        self.optimal_parameters=[]
         
-    def logger_init(self, logger_name:str=None):
+    def logger_init(self, logger_name:str=None,):
             if logger_name is None:
                 logger_name = 'Sequential_AdaptVQE' + self.current_time
             self.logger = logging.getLogger(logger_name)
@@ -47,14 +51,11 @@ class Sequential_AdaptVQE():
             self.logger.info('logger初始化完毕!')
 
     
-    def start(self):
-        self.logger.info('初始化无报错，开始进行......')
-        self.current_ansatz = Circuit()
-        self.optimal_parameters=[]
+    def each_round(self):
         for each_qubit in range(self.n_qubits):
             self.logger.info(f'当前处理第{each_qubit}个qubit')
             ansatz = copy.deepcopy(self.current_ansatz)
-            self.logger.info(ansatz)
+            # self.logger.info(ansatz)
             # self.logger.info(f'当前处理的Ansatz为：\n{ansatz}')
             self.three_result = []
             index = 1
@@ -65,20 +66,37 @@ class Sequential_AdaptVQE():
                 else:
                     temp_paramters = copy.deepcopy(self.optimal_parameters)
                     temp_paramters = np.append(temp_paramters,np.random.uniform(-np.pi, np.pi))
-                    self.logger.info(f'当前载入的热启动参数为：{temp_paramters}')
+                    # self.logger.info(f'当前载入的热启动参数为：{temp_paramters}')
                     result = compute_eigenvalue(hamiltonian=self.hamiltonian,ansatz=ansatz,x0=temp_paramters)
                 self.three_result.append(result)
-                self.logger.info('第{}/3次计算结果为：{}'.format(index,result.x))
+                # self.logger.info('第{}/3次计算结果为：{}'.format(index,result.x))
                 index+=1
-            max_index = np.argmin([abs(i.fun) for i in self.three_result])
-            self.logger.info(f'最优的index为：{max_index},因此选定的gate为：{["RX","RY","RZ"][max_index]}')
-            self.logger.info(f'---------------------------')
-            self.current_ansatz+= [RX,RY,RZ][max_index](self.parameter_geneartor.new()).on(each_qubit)
-            self.optimal_parameters=self.three_result[max_index].x
-        self.logger.info(self.current_ansatz)
-        self.logger.info('-----------第1轮完毕，开始添加EHA块-------------')
+            best_index = np.argmin([abs(i.fun) for i in self.three_result])
+            self.logger.info(f'最优的index为：{best_index},因此选定的gate为：{["RX","RY","RZ"][best_index]}')
+            self.vqe_history.append(self.three_result[best_index].fun)
+            self.logger.info(f'----------------------------------')
+            self.current_ansatz+= [RX,RY,RZ][best_index](self.parameter_geneartor.new()).on(each_qubit)
+            self.optimal_parameters=self.three_result[best_index].x
         self.current_ansatz += self.EHA.EHA_ansatz
-        self.logger.info(self.current_ansatz)
+        self.logger.info(f'添加EHA块,Layer={self.n_layers}...')
+        size = len(self.current_ansatz.params_name)
+        self.current_ansatz = change_param_name(circuit_fn=self.current_ansatz, name_map=dict(zip(self.current_ansatz.params_name, [f'p_{i:03d}' for i in range(size)])))
+        # self.logger.info(self.current_ansatz)
+        temp_paramters = copy.deepcopy(self.optimal_parameters)
+        temp_paramters = np.append(temp_paramters, np.random.uniform(-np.pi, np.pi,size=len(self.EHA.EHA_ansatz.params_name)))
+        
+        reault = compute_eigenvalue(hamiltonian=self.hamiltonian,ansatz=self.current_ansatz,x0=temp_paramters)
+        self.optimal_parameters = reault.x
+        self.vqe_history.append(reault.fun)
+       
+        
+    def run(self):
+        for i in range(self.iteration):
+            self.logger.info(f'===================当前进行第{i+1}轮计算====================')
+            self.each_round()
+            self.logger.info(f'第{i+1}轮的计算结果为:{self.vqe_history[-1]},目前参数量为：{len(self.current_ansatz.params_name)}')
+        
+        
             
             
             
